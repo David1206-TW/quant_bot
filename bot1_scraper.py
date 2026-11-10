@@ -10,11 +10,10 @@ DB_PATH = "data/quant.db"
 def fetch_twse_market_data(date_str):
     print(f"啟動真實爬蟲：正在抓取證交所 {date_str} 盤後資料...")
     
-    # 1. 抓取全市場收盤行情 (MI_INDEX)
-    price_url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={date_str}&type=ALLBUT0999"
-    res_price = requests.get(price_url, headers={'User-Agent': 'Mozilla/5.0'})
+    # 1. 抓取全市場收盤行情 (MI_INDEX) - 更新為最新的 RWD API 端點
+    price_url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=json&date={date_str}&type=ALLBUT0999"
+    res_price = requests.get(price_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'})
     
-    # 檢查 API 是否成功回傳資料
     if res_price.status_code != 200:
         print(f"API 請求失敗，狀態碼：{res_price.status_code}")
         return pd.DataFrame()
@@ -29,27 +28,26 @@ def fetch_twse_market_data(date_str):
         print(f"證交所行情 API 回應異常或今日休市 ({json_data.get('stat')})")
         return pd.DataFrame()
         
-    # 動態尋找個股資料所在的區塊
+    # 動態尋找個股資料所在的區塊 (破解 RWD 版的 tables 新結構)
     price_data = None
     price_fields = None
     
-    for key, value in json_data.items():
-        if key.startswith('fields') and '證券代號' in value and '收盤價' in value:
-            price_fields = value
-            data_key = key.replace('fields', 'data')
-            if data_key in json_data:
-                price_data = json_data[data_key]
+    for table in json_data.get('tables', []):
+        fields = table.get('fields', [])
+        if '證券代號' in fields and '收盤價' in fields:
+            price_fields = fields
+            price_data = table.get('data', [])
             break
             
     if not price_data or not price_fields:
-        print("無法在 API 回應中找到行情表格，可能 API 結構變更或今日無資料。")
+        print("無法在 API 回應中找到行情表格，請確認 API 結構是否又變更。")
         return pd.DataFrame()
         
     df_price = pd.DataFrame(price_data, columns=price_fields)
     
-    # 2. 抓取全市場三大法人買賣超 (T86)
+    # 2. 抓取全市場三大法人買賣超 (T86) - 也是換成最新的 RWD API 端點
     time.sleep(3) 
-    inst_url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
+    inst_url = f"https://www.twse.com.tw/rwd/zh/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
     res_inst = requests.get(inst_url, headers={'User-Agent': 'Mozilla/5.0'})
     
     df_inst = pd.DataFrame()
@@ -57,19 +55,25 @@ def fetch_twse_market_data(date_str):
         try:
             inst_json = res_inst.json()
             if inst_json.get('stat') == 'OK':
-                df_inst = pd.DataFrame(inst_json.get('data', []), columns=inst_json.get('fields', []))
-        except:
-             pass
+                for table in inst_json.get('tables', []):
+                    fields = table.get('fields', [])
+                    if '證券代號' in fields and '投信買賣超股數' in fields:
+                        df_inst = pd.DataFrame(table.get('data', []), columns=fields)
+                        break
+        except Exception as e:
+             print(f"解析法人 JSON 失敗: {e}")
         
     # 3. 資料清洗與合併
-    df_price['收盤價'] = pd.to_numeric(df_price['收盤價'].str.replace(',', ''), errors='coerce')
-    df_price['開盤價'] = pd.to_numeric(df_price['開盤價'].str.replace(',', ''), errors='coerce')
-    df_price['漲跌價差'] = pd.to_numeric(df_price['漲跌價差'].str.replace(',', ''), errors='coerce')
-    df_price['成交股數'] = pd.to_numeric(df_price['成交股數'].str.replace(',', ''), errors='coerce')
+    df_price['收盤價'] = pd.to_numeric(df_price['收盤價'].astype(str).str.replace(',', ''), errors='coerce')
+    df_price['開盤價'] = pd.to_numeric(df_price['開盤價'].astype(str).str.replace(',', ''), errors='coerce')
+    df_price['漲跌價差'] = pd.to_numeric(df_price['漲跌價差'].astype(str).str.replace(',', ''), errors='coerce')
+    df_price['成交股數'] = pd.to_numeric(df_price['成交股數'].astype(str).str.replace(',', ''), errors='coerce')
     
     def calc_change_pct(row):
         try:
-            sign = 1 if 'red' in str(row['漲跌(+/-)']) else (-1 if 'green' in str(row['漲跌(+/-)']) else 0)
+            change_text = str(row['漲跌(+/-)'])
+            # 兼容 RWD 版本的 HTML 標籤或是純符號
+            sign = 1 if ('+' in change_text or 'red' in change_text) else (-1 if ('-' in change_text or 'green' in change_text) else 0)
             diff = row['漲跌價差'] * sign
             prev_close = row['收盤價'] - diff
             if prev_close > 0:
@@ -82,12 +86,12 @@ def fetch_twse_market_data(date_str):
     
     if not df_inst.empty and '證券代號' in df_inst.columns:
         if '外陸資買賣超股數(不含外資自營商)' in df_inst.columns:
-             df_inst['外陸資買賣超股數(不含外資自營商)'] = pd.to_numeric(df_inst['外陸資買賣超股數(不含外資自營商)'].str.replace(',', ''), errors='coerce')
+             df_inst['外陸資買賣超股數(不含外資自營商)'] = pd.to_numeric(df_inst['外陸資買賣超股數(不含外資自營商)'].astype(str).str.replace(',', ''), errors='coerce')
         else:
              df_inst['外陸資買賣超股數(不含外資自營商)'] = 0
 
         if '投信買賣超股數' in df_inst.columns:
-             df_inst['投信買賣超股數'] = pd.to_numeric(df_inst['投信買賣超股數'].str.replace(',', ''), errors='coerce')
+             df_inst['投信買賣超股數'] = pd.to_numeric(df_inst['投信買賣超股數'].astype(str).str.replace(',', ''), errors='coerce')
         else:
              df_inst['投信買賣超股數'] = 0
         
@@ -130,8 +134,11 @@ def verify_database():
     print("------------------------\n")
 
 if __name__ == "__main__":
-    today_str = "20261110" # 使用有開盤交易的日期測試
+    # 使用 20261110 測試，確保是台股有開盤的日子
+    today_str = "20261110" 
+    # 正式上線時請改用下方這行：
     # today_str = datetime.now().strftime("%Y%m%d")
+    
     df_market = fetch_twse_market_data(today_str)
     
     if df_market.empty:
