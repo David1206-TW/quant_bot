@@ -22,10 +22,22 @@ def fetch_twse_market_data(date_str):
         print(f"證交所行情 API 回應異常或今日休市 ({res_price.json()['stat']})")
         return pd.DataFrame()
         
-   # 找出個股資料所在的區塊 (通常是 data[9] 或 data[8]，根據欄位特徵判定)
-    price_data = next(data for data in res_price.json()['data9'] if len(data) > 10) if 'data9' in res_price.json() else res_price.json()['data8']
-    price_fields = res_price.json()['fields9'] if 'fields9' in res_price.json() else res_price.json()['fields8']
+  # 動態尋找個股資料所在的區塊 (防禦證交所 API 表格編號隨機跳動的問題)
+    json_data = res_price.json()
+    price_data = None
+    price_fields = None
     
+    for key, value in json_data.items():
+        if key.startswith('fields') and '證券代號' in value and '收盤價' in value:
+            price_fields = value
+            # 找到 fields 之後，把字串裡面的 'fields' 替換成 'data' 就能找到對應的資料
+            price_data = json_data[key.replace('fields', 'data')]
+            break
+            
+    if not price_data or not price_fields:
+        print("無法在 API 回應中找到行情表格，可能 API 結構變更或今日無資料。")
+        return pd.DataFrame()
+        
     df_price = pd.DataFrame(price_data, columns=price_fields)
         
     # 2. 抓取全市場三大法人買賣超 (T86)
