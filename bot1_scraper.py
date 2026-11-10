@@ -14,19 +14,31 @@ def fetch_twse_market_data(date_str):
     price_url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={date_str}&type=ALLBUT0999"
     res_price = requests.get(price_url, headers={'User-Agent': 'Mozilla/5.0'})
     
-    if res_price.json()['stat'] != 'OK':
-        print(f"證交所行情 API 回應異常或今日休市 ({res_price.json()['stat']})")
+    # 檢查 API 是否成功回傳資料
+    if res_price.status_code != 200:
+        print(f"API 請求失敗，狀態碼：{res_price.status_code}")
+        return pd.DataFrame()
+    
+    try:
+        json_data = res_price.json()
+    except Exception as e:
+        print(f"解析 JSON 失敗: {e}")
+        return pd.DataFrame()
+
+    if json_data.get('stat') != 'OK':
+        print(f"證交所行情 API 回應異常或今日休市 ({json_data.get('stat')})")
         return pd.DataFrame()
         
     # 動態尋找個股資料所在的區塊
-    json_data = res_price.json()
     price_data = None
     price_fields = None
     
     for key, value in json_data.items():
         if key.startswith('fields') and '證券代號' in value and '收盤價' in value:
             price_fields = value
-            price_data = json_data[key.replace('fields', 'data')]
+            data_key = key.replace('fields', 'data')
+            if data_key in json_data:
+                price_data = json_data[data_key]
             break
             
     if not price_data or not price_fields:
@@ -41,8 +53,13 @@ def fetch_twse_market_data(date_str):
     res_inst = requests.get(inst_url, headers={'User-Agent': 'Mozilla/5.0'})
     
     df_inst = pd.DataFrame()
-    if res_inst.json()['stat'] == 'OK':
-        df_inst = pd.DataFrame(res_inst.json()['data'], columns=res_inst.json()['fields'])
+    if res_inst.status_code == 200:
+        try:
+            inst_json = res_inst.json()
+            if inst_json.get('stat') == 'OK':
+                df_inst = pd.DataFrame(inst_json.get('data', []), columns=inst_json.get('fields', []))
+        except:
+             pass
         
     # 3. 資料清洗與合併
     df_price['收盤價'] = pd.to_numeric(df_price['收盤價'].str.replace(',', ''), errors='coerce')
@@ -63,9 +80,16 @@ def fetch_twse_market_data(date_str):
             
     df_price['漲跌幅(%)'] = df_price.apply(calc_change_pct, axis=1)
     
-    if not df_inst.empty:
-        df_inst['外陸資買賣超股數(不含外資自營商)'] = pd.to_numeric(df_inst['外陸資買賣超股數(不含外資自營商)'].str.replace(',', ''), errors='coerce')
-        df_inst['投信買賣超股數'] = pd.to_numeric(df_inst['投信買賣超股數'].str.replace(',', ''), errors='coerce')
+    if not df_inst.empty and '證券代號' in df_inst.columns:
+        if '外陸資買賣超股數(不含外資自營商)' in df_inst.columns:
+             df_inst['外陸資買賣超股數(不含外資自營商)'] = pd.to_numeric(df_inst['外陸資買賣超股數(不含外資自營商)'].str.replace(',', ''), errors='coerce')
+        else:
+             df_inst['外陸資買賣超股數(不含外資自營商)'] = 0
+
+        if '投信買賣超股數' in df_inst.columns:
+             df_inst['投信買賣超股數'] = pd.to_numeric(df_inst['投信買賣超股數'].str.replace(',', ''), errors='coerce')
+        else:
+             df_inst['投信買賣超股數'] = 0
         
         df_inst_clean = df_inst[['證券代號', '外陸資買賣超股數(不含外資自營商)', '投信買賣超股數']]
         df_inst_clean.columns = ['證券代號', '外資買賣超', '投信買賣超']
@@ -86,7 +110,6 @@ def save_to_database(df):
     print("✅ 已將真實漲停與籌碼資料寫入 SQLite (bot1_limit_up_pool)。")
 
 def verify_database():
-    """從資料庫讀取並印出最新寫入的 5 筆紀錄，方便在 GitHub Actions 日誌中確認"""
     print("\n--- 📝 資料庫寫入驗證 ---")
     if not os.path.exists(DB_PATH):
         print("❌ 錯誤：找不到資料庫檔案。")
@@ -94,10 +117,8 @@ def verify_database():
         
     conn = sqlite3.connect(DB_PATH)
     try:
-        # 讀取最後寫入的 5 筆紀錄，並排版印出
         df_verify = pd.read_sql_query("SELECT * FROM bot1_limit_up_pool ORDER BY ROWID DESC LIMIT 5", conn)
         print("最新的 5 筆漲停股資料：")
-        # 設定 pandas 印出格式，避免換行折斷
         pd.set_option('display.max_columns', None)
         pd.set_option('display.width', 1000)
         pd.set_option('display.unicode.east_asian_width', True) 
@@ -109,7 +130,8 @@ def verify_database():
     print("------------------------\n")
 
 if __name__ == "__main__":
-    today_str = datetime.now().strftime("%Y%m%d")
+    today_str = "20261110" # 使用有開盤交易的日期測試
+    # today_str = datetime.now().strftime("%Y%m%d")
     df_market = fetch_twse_market_data(today_str)
     
     if df_market.empty:
@@ -125,5 +147,4 @@ if __name__ == "__main__":
         
         save_to_database(final_df)
         
-        # 呼叫驗證函式印出結果
         verify_database()
