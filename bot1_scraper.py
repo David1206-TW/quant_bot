@@ -22,12 +22,12 @@ def fetch_twse_market_data(date_str):
         print(f"證交所行情 API 回應異常或今日休市 ({res_price.json()['stat']})")
         return pd.DataFrame()
         
-    # 找出個股資料所在的區塊 (通常是 data[9] 或 data[8]，根據欄位特徵判定)
+   # 找出個股資料所在的區塊 (通常是 data[9] 或 data[8]，根據欄位特徵判定)
     price_data = next(data for data in res_price.json()['data9'] if len(data) > 10) if 'data9' in res_price.json() else res_price.json()['data8']
     price_fields = res_price.json()['fields9'] if 'fields9' in res_price.json() else res_price.json()['fields8']
     
     df_price = pd.DataFrame(price_data, columns=price_fields)
-    
+        
     # 2. 抓取全市場三大法人買賣超 (T86)
     time.sleep(3) # 禮貌性延遲，避免密集請求被擋
     inst_url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALLBUT0999"
