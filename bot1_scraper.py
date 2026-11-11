@@ -73,7 +73,6 @@ def fetch_twse_market_data(date_str):
     return df_market
 
 def fetch_tpex_market_data():
-    """抓取【上櫃】櫃買中心 OpenAPI 最新盤後資料"""
     print(f"啟動真實爬蟲：正在抓取 櫃買中心(上櫃) OpenAPI 最新盤後資料...")
     headers = {'User-Agent': 'Mozilla/5.0'}
     
@@ -87,14 +86,12 @@ def fetch_tpex_market_data():
             raw_data = res_price.json()
             if raw_data:
                 df_price = pd.DataFrame(raw_data)
-                # 安全獲取指定欄位
                 if 'SecuritiesCompanyCode' in df_price.columns:
                     df_price = df_price[['SecuritiesCompanyCode', 'CompanyName', 'Close', 'Change', 'TradingShares']]
                 else:
-                    # 如果欄名出錯，直接取相對位置
                     df_price = df_price.iloc[:, [1, 2, 3, 4, 8]]
                 df_price.columns = ['證券代號', '證券名稱', '收盤價', '漲跌價差_原始', '成交股數']
-        except Exception as e: print(f"解析上櫃價格 OpenAPI 失敗: {e}")
+        except Exception as e: print(f"解析上櫃價格失敗: {e}")
 
     # 2. 上櫃法人
     time.sleep(2)
@@ -107,23 +104,19 @@ def fetch_tpex_market_data():
             raw_inst = res_inst.json()
             if raw_inst:
                 df_inst = pd.DataFrame(raw_inst)
-                # 解決官方 OpenAPI 欄名空白/異常 bug，強制抓陣列絕對位置 (1:代號, 5:外資買賣超, 11:投信買賣超)
                 if len(df_inst.columns) >= 12:
                     df_inst = df_inst.iloc[:, [1, 5, 11]]
                     df_inst.columns = ['證券代號', '外資買賣超', '投信買賣超']
-        except Exception as e: print(f"解析上櫃法人 OpenAPI 失敗: {e}")
+        except Exception as e: print(f"解析上櫃法人失敗: {e}")
 
     if df_price.empty: return pd.DataFrame()
 
-    # 3. 清洗與去空白合併
     df_price['證券代號'] = df_price['證券代號'].astype(str).str.strip()
     df_price['收盤價'] = pd.to_numeric(df_price['收盤價'].astype(str).str.replace(',', ''), errors='coerce')
     df_price['成交股數'] = pd.to_numeric(df_price['成交股數'].astype(str).str.replace(',', ''), errors='coerce')
     
     def calc_tpex_pct(row):
         try:
-            # 致命 Bug 修復：OpenAPI 回傳的 Change 沒有 '+' 號 (例如 '1.50')
-            # 直接轉為浮點數，避開找 '+' 的判斷錯誤
             diff = float(str(row['漲跌價差_原始']).replace(',', '').strip())
             prev_close = row['收盤價'] - diff
             return (diff / prev_close) * 100 if prev_close > 0 else 0.0
@@ -156,7 +149,7 @@ def verify_database():
     conn = sqlite3.connect(DB_PATH)
     try:
         df_verify = pd.read_sql_query("SELECT * FROM bot1_limit_up_pool ORDER BY ROWID DESC LIMIT 15", conn)
-        print("最新的 15 筆漲停股資料 (包含外資/投信)：")
+        print("最新的 15 筆漲停股資料 (已過濾權證/ETF，僅保留正規股票)：")
         pd.set_option('display.max_columns', None)
         pd.set_option('display.width', 1000)
         pd.set_option('display.unicode.east_asian_width', True) 
@@ -176,6 +169,9 @@ if __name__ == "__main__":
     if df_all.empty:
         print("今日全市場無交易資料，BOT 1 結束排程。")
     else:
+        # ★ 關鍵過濾：只保留代碼為 4 碼的標的 (剃除 6 碼的權證、ETN、ETF)
+        df_all = df_all[df_all['證券代號'].str.len() == 4]
+        
         limit_up_df = df_all[(df_all['漲跌幅(%)'] >= 9.8) & (df_all['成交股數'] > 0)].copy()
         limit_up_df['trade_date'] = today_str
         
@@ -183,6 +179,6 @@ if __name__ == "__main__":
         final_df = limit_up_df[[c for c in final_cols if c in limit_up_df.columns]]
         final_df = final_df.fillna({'外資買賣超': 0, '投信買賣超': 0})
         
-        print(f"掃描完成！今日【上市+上櫃】共有 {len(final_df)} 檔漲停。")
+        print(f"掃描完成！今日【上市+上櫃】共有 {len(final_df)} 檔正規股票漲停。")
         save_to_database(final_df)
         verify_database()
